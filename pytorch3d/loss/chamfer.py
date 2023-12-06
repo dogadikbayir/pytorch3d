@@ -69,6 +69,32 @@ def _handle_pointcloud_input(
         )
     return X, lengths, normals
 
+def _tangent_vectors_pred(
+    x
+):
+    x_nn = knn_points(x, x, K=2)
+    #print(x_nn.idx.shape)
+    num_dims = x_nn.idx[..., 1].squeeze().dim()
+
+    new_shape = tuple(x_nn.idx[...,1].squeeze().shape) + tuple(
+        1
+        for _ in range(x.dim() - num_dims)
+    )
+    repeats = tuple(
+        1
+        for _ in range(num_dims)
+    ) + tuple(x.shape[num_dims:])
+
+
+    repeated_indices = x_nn.idx[..., 1].reshape(*new_shape).repeat(*repeats)
+
+    x_re = torch.gather(x, num_dims-1, repeated_indices)
+
+    #print(x_nn.dists)
+    #print(x_nn.idx)
+    #print(x_nn.dists[..., 1])
+    #print(x-x_re)
+    return (x - x_re) / x_nn.dists[...,1][:,:, None]
 
 def _chamfer_distance_single_direction(
     x,
@@ -81,7 +107,7 @@ def _chamfer_distance_single_direction(
     batch_reduction: Union[str, None],
     point_reduction: Union[str, None],
     norm: int,
-    abs_cosine: bool,
+    abs_cosine: bool
 ):
     return_normals = x_normals is not None and y_normals is not None
 
@@ -157,7 +183,7 @@ def _chamfer_distance_single_direction(
 
     cham_dist = cham_x
     cham_normals = cham_norm_x if return_normals else None
-    return cham_dist, cham_normals
+    return cham_dist, cham_normals, x_nn.idx
 
 
 def chamfer_distance(
@@ -173,6 +199,7 @@ def chamfer_distance(
     norm: int = 2,
     single_directional: bool = False,
     abs_cosine: bool = True,
+    mode: Union[str, None] = None
 ):
     """
     Chamfer distance between two pointclouds x and y.
@@ -228,7 +255,7 @@ def chamfer_distance(
     x, x_lengths, x_normals = _handle_pointcloud_input(x, x_lengths, x_normals)
     y, y_lengths, y_normals = _handle_pointcloud_input(y, y_lengths, y_normals)
 
-    cham_x, cham_norm_x = _chamfer_distance_single_direction(
+    cham_x, cham_norm_x, xy_idx = _chamfer_distance_single_direction(
         x,
         y,
         x_lengths,
@@ -244,7 +271,7 @@ def chamfer_distance(
     if single_directional:
         return cham_x, cham_norm_x
     else:
-        cham_y, cham_norm_y = _chamfer_distance_single_direction(
+        cham_y, cham_norm_y, yx_idx = _chamfer_distance_single_direction(
             y,
             x,
             y_lengths,
@@ -257,12 +284,48 @@ def chamfer_distance(
             norm,
             abs_cosine,
         )
+        if mode == 'oriented':
+
+            tangent_vectors_pred = _tangent_vectors_pred(x)
+
+            dot_prod_xy = torch.pow(torch.sum(_reorder_tensor(tangent_vectors_pred, xy_idx) * x_normals, dim=-1), 2)
+            dot_prod_yx = torch.pow(torch.sum(tangent_vectors_pred * _reorder_tensor(x_normals, yx_idx), dim=-1), 2)
+
+            #print(dot_prod_xy)
+            #print(dot_prod_yx)
+            if batch_reduction is not None:
+                dot_prod_xy = dot_prod_xy.mean()
+                dot_prod_yx = dot_prod_yx.mean()
+
+
+
         if point_reduction is not None:
             return (
                 cham_x + cham_y,
                 (cham_norm_x + cham_norm_y) if cham_norm_x is not None else None,
+                (dot_prod_xy + dot_prod_yx) if mode is not None else None
             )
         return (
             (cham_x, cham_y),
             (cham_norm_x, cham_norm_y) if cham_norm_x is not None else None,
+            (dot_prod_xy, dot_prod_yx) if mode is not None else None
         )
+
+def _reorder_tensor(t, idx):
+    num_dims = idx.squeeze().dim()
+
+    new_shape = tuple(idx.squeeze().shape) + tuple(
+        1
+        for _ in range(t.dim() - num_dims)
+    )
+    repeats = tuple(
+        1
+        for _ in range(num_dims)
+    ) + tuple(t.shape[num_dims:])
+
+
+    repeated_indices = idx.reshape(*new_shape).repeat(*repeats)
+
+    return torch.gather(t, num_dims-1, repeated_indices)
+
+
